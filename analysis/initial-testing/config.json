@@ -1,0 +1,8 @@
+
+  {"paths":{
+    "root": "data/",
+    "sindy": "data/pacco_vanilla.csv",
+    "pacco": "data/pacco_noisy.csv",
+    "proxy_data": "data/lr04_stack.csv",
+    "results_dir": "outputs/experiment_d/"}
+  }
