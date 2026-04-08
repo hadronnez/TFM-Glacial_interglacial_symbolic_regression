@@ -31,7 +31,6 @@ function normalization(vec, p, scale = 1e5)
     end
 end
 
-
 ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 data_path = joinpath(ROOT, "analysis", "experiment-A", "input", "BASE.nc")
 output_path = joinpath(ROOT, "analysis", "experiment-A", "output")
