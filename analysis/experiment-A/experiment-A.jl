@@ -10,6 +10,7 @@ using StatsAPI
 using DataInterpolations
 using Dates 
 using JSON  
+using MLUtils
 
 function find_times(t0, tend, time_vector) 
      # findmin(vector)[2] extracts only the index
@@ -18,16 +19,19 @@ function find_times(t0, tend, time_vector)
      return t0_index, tend_index
 end
 
-function normalization(vec, p, scale = 1e5)
+function normalization(vec, p; scale = nothing)
     if p == "z"
         m, s = mean(vec), std(vec)
         norm_vec = (vec .- m) ./ s
-        # Returns the vector, the mean, and the std
         return norm_vec, m, s 
     elseif p == "max"
-        norm_vec = vec ./ scale
-        # Returns the vector, and 'nothing' for mean/std since they aren't used
-        return norm_vec, nothing, nothing 
+        # Use the provided scale or find the maximum absolute value
+        s = isnothing(scale) ? maximum(abs.(vec)) : scale
+        norm_vec = vec ./ s
+        # Return 0.0 for mean to keep the 3-value structure consistent
+        return norm_vec, 0.0, s 
+    else
+        error("Normalization type 'p' must be 'z' or 'max'")
     end
 end
 
@@ -47,23 +51,23 @@ println("==========================================\n")
 println("📂 Loading NetCDF data...")
 ds = NCDataset(data_path)
 
-variables = ["time", "I", "C", "Vol"]
-tspan_idx = find_times(-800e3, -400e3, vec(ds["time"][:]))
+variables = ["time", "I", "C", "H"]
+tspan_idx = find_times(-800e3, -0e3, vec(ds["time"][:]))
 
 t = vec(ds["time"][tspan_idx[1]:tspan_idx[2]]) 
 I = vec(ds["I"][tspan_idx[1]:tspan_idx[2]])
 C = vec(ds["C"][tspan_idx[1]:tspan_idx[2]])
-V = vec(ds["Vol"][tspan_idx[1]:tspan_idx[2]])
+H = vec(ds["H"][tspan_idx[1]:tspan_idx[2]])
 
 close(ds)
 
 t_scale = 1e5
-V_norm, V_mean, V_std = normalization(V, "z")
-I_norm, I_mean, I_std = normalization(I, "z")
-C_norm, C_mean, C_std = normalization(C, "z")
+H_norm, H_mean, H_std = normalization(H, "max")
+I_norm, I_mean, I_std = normalization(I, "max")
+C_norm, C_mean, C_std = normalization(C, "max")
 t_norm, _, _          = normalization(t, "max", t_scale)
 
-X = reshape(vcat(V_norm), 1, :) 
+X = reshape(vcat(H_norm), 1, :) 
 U = reshape(vcat(I_norm, C_norm), 2, :) 
 
 println("  → Data matrix shape: $(size(X)) (vars × time)")
@@ -74,14 +78,13 @@ ddprob = ContinuousDataDrivenProblem(X, t_norm, U=U)
 # ─── 2. Building Basis ──────────────────────────────────────────────────────
 
 @parameters τ
-@variables i(τ) v(τ) c(τ)
-u_vars = [v]            
+@variables i(τ) h(τ) c(τ)
+u_vars = [h]            
 c_vars = [i, c]         
-vars = [i, v, c]        
-function_library=
-    [
-    polynomial_basis(vars, 3);
-    ]
+vars = [i, h, c]        
+function_library = [
+    polynomial_basis(vars, 4);
+]
 
 basis = Basis(function_library, u_vars, controls=c_vars, iv = τ) 
 
@@ -89,9 +92,10 @@ basis = Basis(function_library, u_vars, controls=c_vars, iv = τ)
 
 println("\n🚀 Solving with SR3")
 
-threshold = exp10.(range(-5, 0, length=100))
-opt = SR3(threshold)
-sol = solve(ddprob, basis, opt, options=DataDrivenCommonOptions(maxiters=10000))
+sampler = DataProcessing(split = 0.8, shuffle = false, batchsize = 50, rng=MLUtils.Xoshiro(42))
+λs = exp10.(-10:0.1:-1)
+opt = ADMM(λs)
+sol = solve(ddprob, basis, opt, options = DataDrivenCommonOptions(data_processing = sampler, digits = 4, maxiters = 15000))
 
 # ─── 4. Analysis ────────────────────────────────────────────────────────────
 
@@ -121,7 +125,7 @@ function discovered_ode!(du, u, p, t_val)
     du .= discovered_sys(u, p, t_val, u_control)
 end
 
-u0_norm = [V_norm[1]]
+u0_norm = [H_norm[1]]
 tspan_norm = (t_norm[1], t_norm[end])
 ode_prob = ODEProblem(discovered_ode!, u0_norm, tspan_norm, p_opt)
 
@@ -130,8 +134,8 @@ sim_sol = solve(ode_prob, Tsit5(), saveat=t_norm)
 # ==========================================
 #       DENORMALIZATION FOR PLOTTING
 # ==========================================
-sim_V_real = sim_sol[1, :] .* V_std .+ V_mean
-deriv_scale = V_std / t_scale
+sim_H_real = sim_sol[1, :] .* H_std .+ H_mean
+deriv_scale = H_std / t_scale
 dX_true_real = dX_true_norm .* deriv_scale
 dX_predicted_real = dX_predicted_norm .* deriv_scale
 
@@ -150,41 +154,41 @@ time_labels = [string(round(Int, t[i] / 1000), "k") for i in label_idx]
 
 fig = Figure(size = (1300, 700))
 
-# Top Left: Time vs V
-ax1 = Axis(fig[1, 1], title = "State Variable: V(t) [$exp_key]", xlabel = "Time", ylabel = "V")
-scatterlines!(ax1, t, V, label = "Real Data (V)", color = :blue, linewidth=0.75, linestyle=:dash, markersize=4)
+# Top Left: Time vs H
+ax1 = Axis(fig[1, 1], title = "State Variable: H(t) [$exp_key]", xlabel = "Time", ylabel = "H")
+scatterlines!(ax1, t, H, label = "Real Data (H)", color = :blue, linewidth=0.75, linestyle=:dash, markersize=4)
 
 if sim_sol.retcode == ReturnCode.Success || sim_sol.retcode == ReturnCode.Terminated
-    scatterlines!(ax1, t, sim_V_real, label = "Simulated ODE", color = :red, linewidth=0.75, linestyle=:dash, markersize=4)
+    scatterlines!(ax1, t, sim_H_real, label = "Simulated ODE", color = :red, linewidth=0.75, linestyle=:dash, markersize=4)
 else
     println("⚠️ ODE simulation failed to complete.")
     t_failed_real = sim_sol.t .* t_scale
-    scatterlines!(ax1, t_failed_real, sim_V_real, label = "Simulated ODE (Failed/Truncated)", color = :orange, linewidth=0.75, linestyle=:dot, markersize=4)
+    scatterlines!(ax1, t_failed_real, sim_H_real, label = "Simulated ODE (Failed/Truncated)", color = :orange, linewidth=0.75, linestyle=:dot, markersize=4)
 end
 axislegend(ax1, position = :rt)
 
-# Bottom Left: Time vs dV/dt
-ax2 = Axis(fig[2, 1], title = "Derivatives: dV/dt", xlabel = "Time", ylabel = "dV/dt")
+# Bottom Left: Time vs dH/dt
+ax2 = Axis(fig[2, 1], title = "Derivatives: dH/dt", xlabel = "Time", ylabel = "dH/dt")
 scatterlines!(ax2, t, dX_true_real[1, :], label = "Numerical Derivative (Data)", color = :blue, linewidth=0.75, linestyle=:dash, markersize=4)
 scatterlines!(ax2, t, dX_predicted_real[1, :], label = "Predicted Derivative (Model)", color = :red, linewidth=0.75, linestyle=:dash, markersize=4)
 axislegend(ax2, position = :rt)
 
-# Right Side: Phase Portrait (V vs dV/dt)
-ax3 = Axis(fig[1:2, 2], title = "Phase Portrait: V vs dV/dt", xlabel = "V", ylabel = "dV/dt")
+# Right Side: Phase Portrait (H vs dH/dt)
+ax3 = Axis(fig[1:2, 2], title = "Phase Portrait: H vs dH/dt", xlabel = "H", ylabel = "dH/dt")
 
 # --- TRUE PHASE SPACE (BLUE) ---
-scatterlines!(ax3, V, vec(dX_true_real[1, :]), label = "True Phase Space", color = :blue, linewidth=0.9, linestyle=:dash, markersize=4)
+scatterlines!(ax3, H, vec(dX_true_real[1, :]), label = "True Phase Space", color = :blue, linewidth=0.9, linestyle=:dash, markersize=4)
 # Highlight the labeled points by plotting larger, darker markers directly over them
-scatter!(ax3, V[label_idx], vec(dX_true_real[1, :])[label_idx], color = :darkblue, markersize = 10)
+scatter!(ax3, H[label_idx], vec(dX_true_real[1, :])[label_idx], color = :darkblue, markersize = 10)
 # Add labels offset upwards
-text!(ax3, V[label_idx], vec(dX_true_real[1, :])[label_idx], text = time_labels, fontsize = 11, color = :darkblue, offset = (6, 6), font = :bold)
+text!(ax3, H[label_idx], vec(dX_true_real[1, :])[label_idx], text = time_labels, fontsize = 11, color = :darkblue, offset = (6, 6), font = :bold)
 
 # --- PREDICTED PHASE SPACE (RED) ---
-scatterlines!(ax3, V, vec(dX_predicted_real[1, :]), label = "Predicted Phase Space", color = :red, linewidth=0.9, linestyle=:dash, markersize=4)
+scatterlines!(ax3, H, vec(dX_predicted_real[1, :]), label = "Predicted Phase Space", color = :red, linewidth=0.9, linestyle=:dash, markersize=4)
 # Highlight the labeled points by plotting larger, darker markers directly over them
-scatter!(ax3, V[label_idx], vec(dX_predicted_real[1, :])[label_idx], color = :darkred, markersize = 10)
+scatter!(ax3, H[label_idx], vec(dX_predicted_real[1, :])[label_idx], color = :darkred, markersize = 10)
 # Add labels offset downwards (to prevent overlapping with the blue text)
-text!(ax3, V[label_idx], vec(dX_predicted_real[1, :])[label_idx], text = time_labels, fontsize = 11, color = :darkred, offset = (6, -14), font = :bold)
+text!(ax3, H[label_idx], vec(dX_predicted_real[1, :])[label_idx], text = time_labels, fontsize = 11, color = :darkred, offset = (6, -14), font = :bold)
 
 axislegend(ax3, position = :rt)
 
