@@ -1,0 +1,32 @@
+
+Simplified:
+
+[V,C] for state diagnosis
+[I(t)] as external forcing
+
+
+library = [
+    V, C,           # linear relaxation terms
+    V^2,            # geometric ice sheet growth (area ∝ L²)
+    log(C),         # CO₂ radiative forcing (Myhre 1998)
+    V*log(C),       # ice-CO₂ nonlinear coupling via temperature
+    I,              # direct insolation forcing
+    V*I,            # albedo-insolation feedback
+]
+
+More PACCO reasoned:
+
+X = [V, B, α]   # slow independent variables
+U = [I(t)]      # known external forcing
+
+library = [
+    V,              # linear self-decay
+    B,              # isostatic memory
+    α,              # albedo aging memory  
+    V^2,            # geometric nonlinearity (S ∝ L²)
+    (1-α)*I,        # effective insolation = key AGING mechanism (Eq. A1)
+    V*B,            # elevation-isostasy coupling
+    I,              # direct forcing
+    log(C_0 + k*V)  # approximate CO₂ as function of V via slaving
+]
+

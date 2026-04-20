@@ -13,21 +13,12 @@ using MLUtils
 # UTILITY FUNCTIONS
 # ==============================================================================
 
-"""
-    find_times(t0, tend, time_vector)
-
-Finds indices closest to t0 and tend using a non-allocating search.
-"""
 function find_times(t0::T, tend::T, time_vector::AbstractVector{T}) where T <: Real
      t0_index = argmin(abs(t - t0) for t in time_vector)
      tend_index = argmin(abs(t - tend) for t in time_vector)
      return t0_index, tend_index
 end
 
-"""
-    normalization(vec, p)
-    normalization(vec, p, scale)
-"""
 function normalization(vec::AbstractVector{T}, p::Union{String, Char}) where T <: Number
     method = string(p)
     if method == "z"
@@ -70,32 +61,26 @@ function load_raw_data(data_path::String, t_start::Real, t_end::Real)
 end
 
 function preprocess_and_upsample(t_raw, I_raw, C_raw, H_raw; upsample_factor::Int=5, t_scale::Float64=1e5)
-    # Normalization
     H_norm, H_mean, H_std = normalization(H_raw, "max")
     I_norm, _, _          = normalization(I_raw, "max")
     C_norm, _, _          = normalization(C_raw, "max")
     t_norm, _, _          = normalization(t_raw, "max", t_scale)
 
-    # Interpolators
     H_interp_func = CubicSpline(H_norm, t_norm)
-    I_interp_func = LinearInterpolation(I_norm, t_norm)
-    C_interp_func = LinearInterpolation(C_norm, t_norm)
+    I_interp_func = CubicSpline(I_norm, t_norm) 
+    C_interp_func = CubicSpline(C_norm, t_norm)
 
-    # Grids
     n_points = length(t_norm) * upsample_factor
     t_norm_final = collect(range(t_norm[1], t_norm[end], length = n_points))
     t_fine_real = collect(range(t_raw[1], t_raw[end], length = n_points))
 
-    # Evaluate
     H_fine = H_interp_func.(t_norm_final)
     I_fine = I_interp_func.(t_norm_final)
     C_fine = C_interp_func.(t_norm_final)
 
-    # Matrices
     X = reshape(H_fine, 1, :) 
     U = reshape(vcat(I_fine', C_fine'), 2, :) 
     
-    # Bundle scaling parameters for later use
     scaling = (H_mean=H_mean, H_std=H_std, t_scale=t_scale)
 
     return X, U, t_norm_final, t_fine_real, H_fine, I_fine, C_fine, scaling
@@ -103,71 +88,90 @@ end
 
 function build_sindy_basis()
     @parameters τ
-    @variables i(τ) h(τ) c(τ)
+    @variables h(τ) i(τ) c(τ)
     
     u_vars = [h]            
-    c_vars = [i, c]         
-    vars = [i, h, c]        
+    c_vars = [i, c]
     
-
+    # 🛑 PURE FORCING BASIS: Notice 'h' is completely absent from the library.
+    # SINDy is only allowed to combine the bounded external forcings.
     function_library = [
-            # 1;
-            # h; h^2; h^3;        # Allowed back in to create the "tipping point" fold
-            # i; c;               # Standard linear forcings
-            # i^2; c^2;           # Standard nonlinear forcings
-            # h * i; h * c;       # Linear interactions
-            # h^2 * i; h^2 * c;   # THE TRIGGERS: High ice (h^2) + forcing = rapid collapse
-            # h * i^2; h * c^2    # High forcing interacting with state
-            polynomial_basis(vars, 2);
+        1, i, c, 
+        i^2, c^2, i * c,
+        i^3, c^3, i^2 * c, i * c^2
     ]
 
     return Basis(function_library, u_vars, controls=c_vars, iv = τ)
 end
 
 function solve_sindy(X, U, t_norm_final)
-    println("\n🚀 Solving with STLSQ")
-    ddprob = ContinuousDataDrivenProblem(X, t_norm_final, U=U)
+    println("\n🚀 Solving with Externally Forced Attractor Architecture")
+    
+    dummy_prob = ContinuousDataDrivenProblem(X, t_norm_final, U=U)
+    dX_true = dummy_prob.DX 
+    
+    # 1. Find the natural baseline to get a starting point for H
+    A_lin = vcat(X, U, ones(1, size(U, 2)))'
+    lin_coeffs_raw = A_lin \ dX_true' 
+    
+    # 2. Force an Unconditionally Stable Anchor
+    # Even if the data suggests positive feedback, we force a minimum anchor of -0.5
+    alpha_H = min(lin_coeffs_raw[1], -0.5) 
+    
+    # 3. Calculate the new residual (True Derivative - Anchor Pull)
+    # Now we are asking SINDy: "What forcing overcomes this anchor to create the true climate?"
+    dX_residual = dX_true .- (alpha_H .* X)
+    
+    # 4. Train SINDy exclusively to build the Forcing Function
+    ddprob = ContinuousDataDrivenProblem(X, t_norm_final, dX_residual, U=U)
     basis = build_sindy_basis()
     
-    sampler = DataProcessing(split = 0.8, shuffle = false, batchsize = 50)
+    sampler = DataProcessing(split = 0.8, shuffle = false, batchsize = 50, rng=MLUtils.Xoshiro(42))
     
-    # Provide a SEARCH SPACE for the threshold, not just a hardcoded value.
-    # SINDy will test these and pick the best trade-off between accuracy and sparsity.
+    # 🔄 Switched to SR3 optimizer for better handling of derivative spikes
     λs = exp10.(-3.0:0.1:1.0)    
-    opt = STLSQ(λs)
+    opt = SR3(λs) 
     options = DataDrivenCommonOptions(data_processing = sampler, digits = 4, maxiters = 25000)
     
     sol = solve(ddprob, basis, opt, options=options)
-    return sol, ddprob
+    
+    return sol, dummy_prob, alpha_H
 end
 
-function simulate_ode(sol, H_fine, I_fine, C_fine, t_norm_final)
+function simulate_ode(sol, H_fine, I_fine, C_fine, t_norm_final, alpha_H)
     discovered_sys = get_basis(sol)
     p_opt = get_parameter_values(discovered_sys)
 
-    I_interp_ode = CubicSpline(I_fine, t_norm_final)
-    C_interp_ode = CubicSpline(C_fine, t_norm_final)
+    I_interp_ode = LinearInterpolation(I_fine, t_norm_final)
+    C_interp_ode = LinearInterpolation(C_fine, t_norm_final)
 
-    # Pre-calculate bounds for extreme safety
     t_min = t_norm_final[1]
     t_max = t_norm_final[end]
 
     function discovered_ode!(du, u, p, t_val)
-        # CLAMP time to prevent spline extrapolation explosions
         safe_t = clamp(t_val, t_min, t_max)
-        u_control = [I_interp_ode(safe_t), C_interp_ode(safe_t)]
-        du .= discovered_sys(u, p, safe_t, u_control)
+        i_val = I_interp_ode(safe_t)
+        c_val = C_interp_ode(safe_t)
+        u_control = [i_val, c_val]
+        
+        # SINDy Forcing Function F(I, C)
+        forcing_part = discovered_sys(u, p, safe_t, u_control)
+        
+        # Hardcoded Stable Anchor: -alpha * H
+        anchor_part = alpha_H * u[1] 
+        
+        # Total ODE: Guaranteed bounded response
+        du .= anchor_part .+ forcing_part
     end
 
     u0_norm = [H_fine[1]]
     tspan_norm = (t_norm_final[1], t_norm_final[end])
     ode_prob = ODEProblem(discovered_ode!, u0_norm, tspan_norm, p_opt)
     
-    # SAFETY GUARD: Stop if normalized state > 5.0
-    domain_guard = (u, p, t) -> any(x -> abs(x) > 5.0, u)
+    domain_guard = (u, p, t) -> any(x -> abs(x) > 10.0, u)
 
     sim_sol = solve(ode_prob, Rosenbrock23(), 
-                    reltol=1e-4, abstol=1e-4, # Slightly loosened tolerances for stability
+                    reltol=1e-4, abstol=1e-4, 
                     saveat=t_norm_final,
                     isoutofdomain=domain_guard,
                     maxiters=10_000)
@@ -175,29 +179,30 @@ function simulate_ode(sol, H_fine, I_fine, C_fine, t_norm_final)
     return sim_sol, discovered_sys, p_opt
 end
 
-function plot_results(exp_key, output_path, sol, sim_sol, ddprob, X, U, t_norm_final, t_fine_real, H_fine, scaling)
+function plot_results(exp_key, output_path, sol, sim_sol, ddprob, X, U, t_norm_final, t_fine_real, H_fine, scaling, alpha_H)
     println("\n📊 Plotting results...")
 
     discovered_sys = get_basis(sol)
     p_opt = get_parameter_values(discovered_sys)
 
-    dX_predicted_norm = discovered_sys(X, p_opt, t_norm_final, U)
+    # Reconstruct Full Prediction
+    dX_sindy_forcing = discovered_sys(X, p_opt, t_norm_final, U)
+    dX_anchor = alpha_H .* X 
+    
+    dX_predicted_norm = dX_anchor .+ dX_sindy_forcing
     dX_true_norm = ddprob.DX 
     
-    # Denormalization
     deriv_scale = scaling.H_std / scaling.t_scale
     dX_true_real = dX_true_norm .* deriv_scale
     dX_predicted_real = dX_predicted_norm .* deriv_scale
     H_fine_real = H_fine .* scaling.H_std .+ scaling.H_mean
 
-    # Label setup
     target_times = range(ceil(t_fine_real[1]/50000)*50000, floor(t_fine_real[end]/50000)*50000, step=50000)
     label_idx = [argmin(abs.(t_fine_real .- tt)) for tt in target_times]
     time_labels = [string(round(Int, t_fine_real[i] / 1000), "k") for i in label_idx]
 
     fig = Figure(size = (1300, 700))
 
-    # Ax1: Time vs H
     ax1 = Axis(fig[1, 1], title = "State Variable: H(t)", xlabel = "Time", ylabel = "H")
     scatterlines!(ax1, t_fine_real, H_fine_real, label = "Upsampled Data", color = (:blue, 0.3), markersize=2)
     
@@ -206,18 +211,15 @@ function plot_results(exp_key, output_path, sol, sim_sol, ddprob, X, U, t_norm_f
         lines!(ax1, t_fine_real, sim_H_real, label = "Simulated ODE", color = :red, linewidth=2)
     else
         sim_H_real_failed = sim_sol[1,:] .* scaling.H_std .+ scaling.H_mean
-        lines!(ax1, sim_sol.t .* scaling.t_scale, sim_H_real_failed, label = "Failed ODE (Exploded)", color = :orange, linestyle=:dot)
-        println("\n⚠️ WARNING: ODE exploded or stalled, plotting valid points up to failure.")
+        lines!(ax1, sim_sol.t .* scaling.t_scale, sim_H_real_failed, label = "Failed ODE", color = :orange, linestyle=:dot)
     end
     axislegend(ax1)
 
-    # Ax2: Time vs dH/dt
     ax2 = Axis(fig[2, 1], title = "Derivatives: dH/dt", xlabel = "Time", ylabel = "dH/dt")
     lines!(ax2, t_fine_real, vec(dX_true_real[1, :]), label = "True (Upsampled)", color = :blue)
     lines!(ax2, t_fine_real, vec(dX_predicted_real[1, :]), label = "Predicted", color = :red)
     axislegend(ax2)
 
-    # Ax3: Phase Portrait
     ax3 = Axis(fig[1:2, 2], title = "Phase Portrait: H vs dH/dt", xlabel = "H", ylabel = "dH/dt")
     lines!(ax3, H_fine_real, vec(dX_true_real[1, :]), color = (:blue, 0.4), label="True")
     lines!(ax3, H_fine_real, vec(dX_predicted_real[1, :]), color = (:red, 0.8), label="Model")
@@ -232,12 +234,12 @@ function plot_results(exp_key, output_path, sol, sim_sol, ddprob, X, U, t_norm_f
     return plot_file
 end
 
-function save_experiment_log(log_file, exp_key, data_path, t_raw, sol, p_opt)
+function save_experiment_log(log_file, exp_key, data_path, t_raw, sol, p_opt, alpha_H)
     metadata = Dict(
         "experiment_key" => exp_key,                   
         "data_path" => data_path,
         "tspan" => (t_raw[1], t_raw[end]),
-        "variables" => ["time", "I", "C", "H"],
+        "stable_anchor_alpha" => alpha_H,
         "basis_functions" => string(get_basis(sol)),
         "parameters" => p_opt,
         "dof" => dof(sol),
@@ -262,33 +264,31 @@ function run_experiment(data_path::String, output_path::String, log_file::String
     println(" STARTING EXPERIMENT: $exp_key")
     println("==========================================\n")
 
-    # 1. Load Data
     t_raw, I_raw, C_raw, H_raw = load_raw_data(data_path, -714e3, -00e3)
     
-    # 2. Preprocess & Upsample
     X, U, t_norm_final, t_fine_real, H_fine, I_fine, C_fine, scaling = preprocess_and_upsample(
-        t_raw, I_raw, C_raw, H_raw; upsample_factor=1
+        t_raw, I_raw, C_raw, H_raw; upsample_factor=5
     )
     println("  → Upsampled Data matrix shape: $(size(X)) (vars × time)")
 
-    # 3. Discover Equations
-    sol, ddprob = solve_sindy(X, U, t_norm_final)
+    sol, ddprob, alpha_H = solve_sindy(X, U, t_norm_final)
+    
+    println("\n⚓ Stable Anchor Discovered:")
+    println("dH/dt_anchor = $(round(alpha_H, digits=3)) * h")
+    println("\n🧩 SINDy Forcing Function F(I, C):")
     println(get_basis(sol))
     println("r^2: $(r2(sol))\n")
 
-    # 4. Simulate ODE
-    sim_sol, discovered_sys, p_opt = simulate_ode(sol, H_fine, I_fine, C_fine, t_norm_final)
+    sim_sol, discovered_sys, p_opt = simulate_ode(sol, H_fine, I_fine, C_fine, t_norm_final, alpha_H)
 
-    # 5. Plot Results
     plot_file = plot_results(
         exp_key, output_path, sol, sim_sol, ddprob, 
-        X, U, t_norm_final, t_fine_real, H_fine, scaling
+        X, U, t_norm_final, t_fine_real, H_fine, scaling, alpha_H
     )
 
-    # 6. Logging
     println("\nWould you like to log the metadata (and the results) of this experiment? (y/[n])")
     if lowercase(readline()) == "y"
-        save_experiment_log(log_file, exp_key, data_path, t_raw, sol, p_opt)
+        save_experiment_log(log_file, exp_key, data_path, t_raw, sol, p_opt, alpha_H)
         println("✅ Plot saved to: $plot_file")
     else
         rm(plot_file, force=true)
@@ -306,5 +306,4 @@ output_path = joinpath(ROOT, "analysis", "experiment-A", "output")
 log_file = joinpath(output_path, "experiments_log.jsonl")
 mkpath(output_path)
 
-# Pass the paths explicitly to avoid global variable pollution
 run_experiment(data_path, output_path, log_file)
