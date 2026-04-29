@@ -1,3 +1,14 @@
+using DataDrivenDiffEq, ModelingToolkit, OrdinaryDiffEq, DataDrivenSparse
+using LinearAlgebra
+using NCDatasets
+using CairoMakie
+using Statistics
+using StatsAPI
+using DataInterpolations
+using Dates 
+using JSON  
+using MLUtils
+using ..MyProject
 
 """
     run_experiment(data_path, output_path, log_file)
@@ -14,30 +25,28 @@ needs to change.
 - `output_path`: Directory for output figures.
 - `log_file`: Path to the `.jsonl` experiment registry.
 """
-function run_experiment(data_path::String, output_path::String, log_file::String)
- 
-    exp_key = "EXP_" * Dates.format(now(), "yyyymmdd_HHMMSS")
+function run_experiment(data_path::String, exp_key::String, exp_dir::String, log_file::String) 
     println("==========================================")
     println(" STARTING EXPERIMENT: $exp_key")
     println("==========================================\n")
  
     # ------------------------------------------------------------------
-    # Configuration — edit here to change variables or candidate library.
-    # Symbolic variables are passed in order: [state_vars..., input_vars...]
+    # Configuration
     # ------------------------------------------------------------------
-    state_vars = ["H"]
-    input_vars = ["I", "C"]
+    state_vars = ["H", "C", "B", "Hsed", "T"]
+
+    input_vars = ["I"]
  
-    my_library = (h, i, c) -> [
+    my_library = (h, i, c, b, t, hsed) -> [
         1;
-        h;
-        i; c;
-        h * i; h * c
+        h; hsed; c; t; i; b;
+        h^2; h^3; h^4;
+        h*t;
     ]
  
     # --- 1. Load ---
     t_raw, data = MyProject.load_raw_data(
-        data_path, -714e3, 0e3,
+        data_path, -2000e3, -1000e3,
         vcat(state_vars, input_vars)
     )
  
@@ -50,19 +59,19 @@ function run_experiment(data_path::String, output_path::String, log_file::String
         do_upsample     = false
     )
  
-    # Named dicts — no hardcoded row indices downstream
     state_data = Dict(v => X[i, :] for (i, v) in enumerate(state_vars))
     input_data = Dict(v => U[i, :] for (i, v) in enumerate(input_vars))
  
     # --- 3. Discover equations ---
-    sampler = DataProcessing(split = 0.8, shuffle = false, batchsize = 50,
+    sampler = DataProcessing(split = 0.99, shuffle = false, batchsize = 50,
                              rng = MLUtils.Xoshiro(42))
- 
+    λs      = exp10.(-0.7)
+
     sol, ddprob = MyProject.solve_sindy(
         X, U, t_norm_final,
         state_vars, input_vars, my_library;
         sampler = sampler,
-        λs      = exp10.(-2.0:0.1:0.0),
+        opt     = STLSQ(λs), 
         options = DataDrivenCommonOptions(
                       data_processing = sampler,
                       digits          = 6,
@@ -77,22 +86,33 @@ function run_experiment(data_path::String, output_path::String, log_file::String
         sol, state_data, input_data, state_vars, input_vars, t_norm_final
     )
  
-    # --- 5. Plot ---
-    plot_file = MyProject.plot_results(
-        exp_key, output_path, sol, sim_sol, ddprob,
+    # --- 5. Plot Standard Diagnostics ---
+    plot_files = MyProject.plot_results(
+        exp_key, exp_dir, sol, sim_sol, ddprob,
         X, U, t_norm_final, t_raw,
-        state_data, state_vars, scaling
+        state_data, state_vars, scaling, state_vars
     )
- 
+    
+# --- 5.5 Plot Hysteresis (Algebraic) ---
+    println("\n📊 Plotting algebraic hysteresis curves...")
+    hysteresis_files = MyProject.plot_hysteresis(
+        exp_key, exp_dir, sol, X, t_norm_final, 
+        state_vars, input_vars, state_data, input_data, scaling
+    )
+    append!(plot_files, hysteresis_files)
+
     # --- 6. Log ---
     println("\nWould you like to log the metadata of this experiment? (y/[n])")
     if lowercase(readline()) == "y"
         MyProject.save_experiment_log(log_file, exp_key, data_path, t_raw,
                             state_vars, input_vars, sol, p_opt)
-        println("✅ Plot saved to: $plot_file")
+        println("✅ Experiment data saved to directory: $exp_dir")
+        for f in plot_files
+            println("  - $(basename(f))")
+        end
     else
-        rm(plot_file, force = true)
-        println("Metadata and results not saved.")
+        rm(exp_dir, recursive = true, force = true)
+        println("Metadata and results not saved. Cleaned up temporary folder.")
     end
 end
  
@@ -101,11 +121,13 @@ end
 # EXECUTION
 # ==============================================================================
  
+exp_key = "EXP_" * Dates.format(now(), "yyyymmdd_HHMMSS")
+
 ROOT        = normpath(joinpath(@__DIR__, "..", ".."))
-data_path   = joinpath(ROOT, "analysis", "experiment-A1", "input", "BASE.nc")
-output_path = joinpath(ROOT, "analysis", "experiment-A1", "output")
+data_path   = joinpath(ROOT, "analysis", "experiment-A2", "input", "BASE.nc")
+output_path = joinpath(ROOT, "analysis", "experiment-A2", "output")
+exp_dir = joinpath(output_path, exp_key)
 log_file    = joinpath(output_path, "experiments_log.jsonl")
-mkpath(output_path)
- 
-run_experiment(data_path, output_path, log_file)
- 
+mkdir(exp_dir)
+
+run_experiment(data_path, exp_key, exp_dir, log_file) 

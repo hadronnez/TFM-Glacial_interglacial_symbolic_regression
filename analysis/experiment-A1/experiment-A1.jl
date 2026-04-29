@@ -1,4 +1,15 @@
 
+using DataDrivenDiffEq, ModelingToolkit, OrdinaryDiffEq, DataDrivenSparse
+using LinearAlgebra
+using NCDatasets
+using CairoMakie
+using Statistics
+using StatsAPI
+using DataInterpolations
+using Dates 
+using JSON  
+using MLUtils
+
 #I run an univariate SINDy experiment using only ["I", "C", "H"].
 #I presented the results of this experiment in the 15-04-2026 .pdf presentation in /notes.
 
@@ -37,7 +48,7 @@ function run_experiment(data_path::String, output_path::String, log_file::String
  
     # --- 1. Load ---
     t_raw, data = MyProject.load_raw_data(
-        data_path, -714e3, 0e3,
+        data_path, -800e3, 0e3,
         vcat(state_vars, input_vars)
     )
  

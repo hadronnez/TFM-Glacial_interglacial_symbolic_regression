@@ -1,14 +1,11 @@
-using DataDrivenDiffEq, ModelingToolkit, OrdinaryDiffEq, DataDrivenSparse
-using LinearAlgebra
-using NCDatasets
-using CairoMakie
-using Statistics
+using DataDrivenDiffEq
+using ModelingToolkit
+using OrdinaryDiffEq
+using DataDrivenSparse
 using StatsAPI
 using DataInterpolations
-using Dates 
 using JSON  
 using MLUtils
-
 
 """
     preprocess_data(t_raw, data; state_vars, input_vars, upsample_factor,
@@ -74,7 +71,8 @@ function preprocess_data(
  
     # --- Input matrix ---
     U = zeros(length(input_vars), length(t_out))
- 
+    U_scaling = Dict{String, Tuple{Float64, Float64}}()
+    
     for (i, v) in enumerate(input_vars)
         u_norm, _, _ = MyProject.normalization(data[v], "max")
  
@@ -85,7 +83,7 @@ function preprocess_data(
         end
     end
  
-    scaling = (state = X_scaling, t_scale = t_scale)
+    scaling = (state = X_scaling, input = U_scaling, t_scale = t_scale)
     return X, U, t_out, scaling
 end
 
