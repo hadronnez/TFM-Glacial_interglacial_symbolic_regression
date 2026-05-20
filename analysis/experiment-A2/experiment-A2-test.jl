@@ -48,7 +48,6 @@ function run_experiment(data_path::String, exp_key::String, exp_dir::String, log
         b;
         h^4;
         h^2;
-        h*t;
     ]
  
     # --- 1. Load ---
@@ -72,7 +71,7 @@ function run_experiment(data_path::String, exp_key::String, exp_dir::String, log
     # --- 3. Discover equations ---
     sampler = DataProcessing(split = 0.99, shuffle = false, batchsize = 50,
                              rng = MLUtils.Xoshiro(42))
-    λs      = exp10.(-1:0.005:-0.8) 
+    λs      = exp10.(-3.5:0.5:-0.5) 
 
     sol, ddprob = MyProject.solve_sindy(
         X, U, t_norm_final,
@@ -99,7 +98,6 @@ function run_experiment(data_path::String, exp_key::String, exp_dir::String, log
         X, U, t_norm_final, t_raw,
         state_data, state_vars, scaling, state_vars
     )
-    
     # --- 5.5 Plot Hysteresis ---
     println("\n📊 Plotting hysteresis curves...")
     hysteresis_files = MyProject.plot_hysteresis(

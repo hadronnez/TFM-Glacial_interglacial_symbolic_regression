@@ -49,6 +49,7 @@ function run_experiment(data_path::String, exp_key::String, exp_dir::String, log
         h^4;
         h^2;
         h*t;
+        h^5;
     ]
  
     # --- 1. Load ---

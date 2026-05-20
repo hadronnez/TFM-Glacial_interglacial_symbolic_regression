@@ -179,7 +179,7 @@ function solve_sindy(
 )
     println("\n🚀 Solving with SINDy")
  
-    ddprob   = ContinuousDataDrivenProblem(X, t_norm_final, U = U)
+    ddprob   = ContinuousDataDrivenProblem(X, t_norm_final, U = U, InterpolationMethod())
     basis    = build_sindy_basis(state_vars, input_vars, function_library)
     _opt     = isnothing(opt)     ? SR3(λs) : opt
     _options = isnothing(options) ? DataDrivenCommonOptions(
@@ -229,7 +229,7 @@ function simulate_ode(
     discovered_sys = get_basis(sol)
     p_opt          = get_parameter_values(discovered_sys)
  
-    interps = [CubicSpline(input_data[v], t_norm_final) for v in input_vars]
+    interps = [CubicSpline(input_data[v], t_norm_final) for v in input_vars] ##cubicspline interpolation will be applied in the ODE function
     t_min   = t_norm_final[1]
     t_max   = t_norm_final[end]
  

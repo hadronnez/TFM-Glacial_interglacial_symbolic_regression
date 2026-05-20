@@ -72,7 +72,7 @@ function run_experiment(data_path::String, exp_key::String, exp_dir::String, log
     # --- 3. Discover equations ---
     sampler = DataProcessing(split = 0.99, shuffle = false, batchsize = 50,
                              rng = MLUtils.Xoshiro(42))
-    λs      = exp10.(5) 
+    λs      = exp10.(0:0.01:0.5) # Regularization path for STLSQ
 
     sol, ddprob = MyProject.solve_sindy(
         X, U, t_norm_final,
