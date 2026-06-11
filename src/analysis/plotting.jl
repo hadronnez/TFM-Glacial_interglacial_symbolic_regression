@@ -1,6 +1,7 @@
 using CairoMakie
 using DataDrivenDiffEq
 using NonlinearSolve
+using LinearAlgebra
 using SciMLBase
 using Statistics
 import FFTW
@@ -28,21 +29,27 @@ function compute_psd(data::Vector{Float64}, t_kyr::Vector{<:AbstractFloat})
     return freqs[mask], power[mask]
 end
 
-function compute_hysteresis_sweeps(sol::DataDrivenSolution, normalized_data::NormalizedTrajectoryData, input_vars::Vector{String}, input_data::Dict{String, Vector{Float64}}, state_vars::Vector{String})
+function compute_hysteresis_sweeps(
+    sol::DataDrivenSolution,
+    normalized_data::NormalizedTrajectoryData,
+    input_vars::Vector{String},
+    input_data::Dict{String, Vector{Float64}},
+    state_vars::Vector{String};
+    n_points::Int = 100
+)
     scaling        = normalized_data.scaling
     target_input   = input_vars[1]
     μ_i, r_i       = scaling.input[target_input]
     U_real         = input_data[target_input]
     discovered_sys = get_basis(sol)
     p_opt          = get_parameter_values(discovered_sys)
-    
+    n_vars         = length(state_vars)
+
     I_min, I_max = minimum(U_real), maximum(U_real)
     I_pad        = (I_max - I_min) * 0.05
-    n_points     = 100
 
     I_forward  = range(I_min - I_pad, I_max + I_pad; length = n_points)
     I_backward = range(I_max + I_pad, I_min - I_pad; length = n_points)
-
     I_forward_norm  = collect(I_forward  .- μ_i) ./ r_i
     I_backward_norm = collect(I_backward .- μ_i) ./ r_i
 
@@ -60,11 +67,15 @@ function compute_hysteresis_sweeps(sol::DataDrivenSolution, normalized_data::Nor
         du .= discovered_sys(u, p_sys, 0.0, u_in)
     end
 
-    u_start = [mean(normalized_data.X[k, :]) for k in 1:length(state_vars)]
+    # Inicialización desde el estado observado en mínima y máxima insolación
+    idx_min = argmin(U_real)
+    idx_max = argmax(U_real)
+    u_at_I_min = normalized_data.X[:, idx_min]
+    u_at_I_max = normalized_data.X[:, idx_max]
 
-    function sweep(i_vals_norm::Vector{Float64})::Matrix{Float64}
-        eq     = zeros(Float64, length(state_vars), n_points)
-        u_curr = copy(u_start)
+    function sweep(i_vals_norm::Vector{Float64}, u_seed::Vector{Float64})::Matrix{Float64}
+        eq     = zeros(Float64, n_vars, n_points)
+        u_curr = copy(u_seed)
         for (k, i_val_norm) in enumerate(i_vals_norm)
             prob   = NonlinearProblem(nl_sys!, u_curr, (p_opt, get_u_input(i_val_norm)))
             sol_nl = solve(prob, NewtonRaphson(); maxiters = 1000)
@@ -78,7 +89,10 @@ function compute_hysteresis_sweeps(sol::DataDrivenSolution, normalized_data::Nor
         return eq
     end
 
-    return I_forward, I_backward, sweep(I_forward_norm), sweep(I_backward_norm), target_input
+    eq_forward  = sweep(I_forward_norm,  u_at_I_min)
+    eq_backward = sweep(I_backward_norm, u_at_I_max)
+
+    return I_forward, I_backward, eq_forward, eq_backward, target_input
 end
 
 # ==============================================================================
@@ -95,13 +109,19 @@ function apply_paper_theme!(gp::GridPosition, ax::Axis, label::String)
     ax.ygridvisible = false
     ax.xtickalign = 1.0
     ax.ytickalign = 1.0
+
+    ax.spinewidth = 2.5
+    ax.xtickwidth = 2.5
+    ax.ytickwidth = 2.5
+    ax.xticksize = 10.0
+    ax.yticksize = 10.0
+
+    ax.xlabelsize = 22
+    ax.ylabelsize = 22
+    ax.xticklabelsize = 18
+    ax.yticklabelsize = 18
     
-    ax.xlabelsize = 14
-    ax.ylabelsize = 14
-    ax.xticklabelsize = 12
-    ax.yticklabelsize = 12
-    
-    Label(gp, label, font = :bold, fontsize = 16,
+    Label(gp, label, font = :bold, fontsize = 24,
           halign = :left, valign = :top, padding = (10, 0, 5, 0),
           tellwidth = false, tellheight = false)
 end
@@ -114,16 +134,16 @@ function render_timeseries!(gp::GridPosition, t_kyr, X_real, sim_data, var_name,
     scatterlines!(ax, t_kyr, X_real; 
                   color = (COLOR_REF, 0.45),      
                   markercolor = COLOR_REF, 
-                  linewidth = 1.5,                
-                  markersize = 3.5)               
+                  linewidth = 3.0,                
+                  markersize = 6.0)               
                   
     if sim_ok
         
         scatterlines!(ax, t_kyr, sim_data[var_idx, :]; 
                       color = (COLOR_DIS, 0.45),  
                       markercolor = COLOR_DIS,    
-                      linewidth = 1.5,            
-                      markersize = 3.5)           
+                      linewidth = 3.0,            
+                      markersize = 6.0)           
     end
 end
 
@@ -134,26 +154,25 @@ function render_derivatives!(gp::GridPosition, t_kyr, dX_true, dX_pred, var_name
     scatterlines!(ax, t_kyr, dX_true; 
                   color = (COLOR_REF, 0.45), 
                   markercolor = COLOR_REF, 
-                  linewidth = 1.5, 
-                  markersize = 3.5)
+                  linewidth = 3.0, 
+                  markersize = 6.0)
                   
     scatterlines!(ax, t_kyr, dX_pred; 
                   color = (COLOR_DIS, 0.45), 
                   markercolor = COLOR_DIS, 
-                  linewidth = 1.5, 
-                  markersize = 3.5)
+                  linewidth = 3.0, 
+                  markersize = 6.0)
 end
 
 function render_phase_portraits!(gp1::GridPosition, gp2::GridPosition, X_real, dX_true, sim_data, dX_pred_norm, deriv_scale, var_name, sim_ok, var_idx, label)
-    # Target de referencia (PACCO)
     ax3 = Axis(gp1; xlabel = var_name, ylabel = "d$(var_name)/dt")
     apply_paper_theme!(gp1, ax3, label * "₁")
     
     scatterlines!(ax3, X_real, dX_true; 
                   color = (COLOR_REF, 0.35), 
                   markercolor = COLOR_REF, 
-                  linewidth = 1.2, 
-                  markersize = 3.0)
+                  linewidth = 2.5, 
+                  markersize = 5.0)
     ax4 = Axis(gp2; xlabel = var_name, ylabel = "d$(var_name)/dt")
     apply_paper_theme!(gp2, ax4, label * "₂")
     
@@ -163,8 +182,8 @@ function render_phase_portraits!(gp1::GridPosition, gp2::GridPosition, X_real, d
         scatterlines!(ax4, sim_data[var_idx, :], dX_sim_real; 
                       color = (COLOR_DIS, 0.35),      
                       markercolor = COLOR_DIS,        
-                      linewidth = 1.2,               
-                      markersize = 3.0)               
+                      linewidth = 2.5,               
+                      markersize = 5.0)               
     end
 end
 
@@ -173,11 +192,11 @@ function render_psd!(gp::GridPosition, t_kyr, X_real, sim_data, var_idx, sim_ok,
     apply_paper_theme!(gp, ax, label)
     
     freqs, power = compute_psd(X_real, t_kyr)
-    lines!(ax, freqs, power; color = COLOR_REF, linewidth = 1.5)
+    lines!(ax, freqs, power; color = COLOR_REF, linewidth = 3.0)
 
     if sim_ok
         freqs_sim, power_sim = compute_psd(sim_data[var_idx, :], t_kyr)
-        lines!(ax, freqs_sim, power_sim; color = COLOR_DIS, linewidth = 1.5, linestyle = :dash)
+        lines!(ax, freqs_sim, power_sim; color = COLOR_DIS, linewidth = 3.0, linestyle = :dash)
     end
     
     milankovitch_periods = [100.0, 41.0, 23.0, 19.0]
@@ -192,14 +211,17 @@ function render_psd!(gp::GridPosition, t_kyr, X_real, sim_data, var_idx, sim_ok,
     ax_top.ygridvisible = false
     ax_top.xtickalign = 1.0
     ax_top.ytickalign = 1.0
-    ax_top.xlabelsize = 12
-    ax_top.xticklabelsize = 11
+    ax_top.spinewidth = 2.5
+    ax_top.xtickwidth = 2.5
+    ax_top.xticksize = 10.0
+    ax_top.xlabelsize = 18
+    ax_top.xticklabelsize = 16
     
     linkyaxes!(ax, ax_top)
     ax_top.xticks = (milankovitch_freqs, ["100k", "41k", "23k", "19k"])
     hideydecorations!(ax_top)
     
-    vlines!(ax, milankovitch_freqs; color = (:gray, 0.25), linestyle = :dot, linewidth = 1)
+    vlines!(ax, milankovitch_freqs; color = (:gray, 0.25), linestyle = :dot, linewidth = 1.5)
     xlims!(ax, 0.0, 0.06) 
     xlims!(ax_top, 0.0, 0.06)
 end
@@ -208,13 +230,14 @@ function render_hysteresis!(gp::GridPosition, I_forward, I_backward, V_forward_r
     ax = Axis(gp; xlabel = "Forcing ($target_input)", ylabel = var_name)
     apply_paper_theme!(gp, ax, label)
     
-    lines!(ax, collect(I_forward),  V_forward_real;  color = COLOR_DIS, linewidth = 2.0)
-    lines!(ax, collect(I_backward), V_backward_real; color = COLOR_DIS, linewidth = 2.0, linestyle = :dash)
+    lines!(ax, collect(I_forward),  V_forward_real;  color = COLOR_DIS, linewidth = 3.0)
+    lines!(ax, collect(I_backward), V_backward_real; color = COLOR_DIS, linewidth = 3.0, linestyle = :dash)
     
     Legend(gp, [[LineElement(color = COLOR_DIS)], [LineElement(color = COLOR_DIS, linestyle = :dash)]],
            ["Forward sweep", "Backward sweep"]; 
            tellwidth = false, tellheight = false, font = :italic,
-           halign = :right, valign = :bottom, margin = (15, 15, 15, 15), framevisible = false)
+           halign = :right, valign = :bottom, margin = (15, 15, 15, 15), framevisible = false,
+           labelsize = 18)
 end
 
 # ==============================================================================
@@ -294,11 +317,11 @@ function plot_results(
         end
 
         Legend(fig[n_rows + 1, 1:2],
-                [[LineElement(color = COLOR_REF, linewidth = 1.5), MarkerElement(color = COLOR_REF, marker = :circle, markersize = 7)],
-                 [LineElement(color = COLOR_DIS, linewidth = 1.5), MarkerElement(color = COLOR_DIS, marker = :circle, markersize = 7)]],
+                [[LineElement(color = COLOR_REF, linewidth = 2.5), MarkerElement(color = COLOR_REF, marker = :circle, markersize = 12)],
+                 [LineElement(color = COLOR_DIS, linewidth = 2.5), MarkerElement(color = COLOR_DIS, marker = :circle, markersize = 12)]],
                 ["Reference Data (PACCO)", "Identified Framework (SINDy)"];
                 orientation = :horizontal, tellwidth = false, tellheight = true, 
-                framevisible = false, labelsize = 13)
+                framevisible = false, labelsize = 18)
 
         plot_file = joinpath(output_path, "$(exp_key)_$(var_name).png")
         
@@ -308,7 +331,6 @@ function plot_results(
 
     return plot_files
 end
-
 # ==============================================================================
 #                        ENSEMBLE STATISTICS PLOT
 # ==============================================================================
@@ -320,7 +342,6 @@ function plot_ensemble_statistics(
 
     fig = Figure(size = (1200, 500), backgroundcolor = :white)
 
-    # Panel (a) - Tasas de inclusión
     ax1 = Axis(fig[1, 1]; xlabel = "Library term index", ylabel = "Inclusion rate")
     ax1.topspinevisible = false
     ax1.rightspinevisible = false
@@ -328,13 +349,11 @@ function plot_ensemble_statistics(
     ax1.ygridvisible = false
     Label(fig[1, 1], "(a)", font = :bold, fontsize = 16, halign = :left, valign = :top, padding = (10, 0, 5, 0), tellwidth=false, tellheight=false)
 
-    # Colores sobrios apagados en vez de saturados intensos
     colors = [r > 0.8 ? "#2ca02c" : r > 0.5 ? "#ff7f0e" : "#d62728" for r in inclusion_rates]
     barplot!(ax1, 1:length(inclusion_rates), inclusion_rates; color = colors, width = 0.7)
     hlines!(ax1, [0.8, 0.5]; color = (:gray, 0.4), linestyle = :dash, linewidth = 1)
     ylims!(ax1, 0, 1.05)
 
-    # Panel (b) - Convergencia
     ax2 = Axis(fig[1, 2]; ylabel = "Count")
     ax2.topspinevisible = false
     ax2.rightspinevisible = false
@@ -354,7 +373,6 @@ function plot_ensemble_statistics(
 
     plot_file = joinpath(output_path, "$(exp_key)_ensemble_statistics.png")
     
-    # ALTA RESOLUCIÓN INDUSTRIAL: Guardado vectorizado renderizado a alta densidad
     save(plot_file, fig; px_per_unit = 3)
     
     return [plot_file]

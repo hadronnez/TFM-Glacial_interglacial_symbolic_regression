@@ -44,7 +44,7 @@ function _plot_dispatch(
                    cfg.generate_derivatives ||
                    cfg.generate_phase_portraits || 
                    cfg.generate_psd ||
-                   cfg.generate_hysteresis # Agregado aquí
+                   cfg.generate_hysteresis 
 
     state_data = Dict{String, Vector{Float64}}(
         v => raw_data.X[i, :] for (i, v) in enumerate(experiment.state_vars)
@@ -57,7 +57,6 @@ function _plot_dispatch(
     plot_files = String[]
 
     if any_var_plot
-        # Ahora llamamos a plot_results pasando tanto state_data/vars como input_data/vars
         files = plot_results(
             experiment.key,
             experiment.exp_dir,
@@ -125,15 +124,26 @@ function display_discovered_equations(sindy_result::SINDyResult)
     println(" DISCOVERED EQUATIONS")
     println("=" ^ 70)
     
-    if sindy_result isa StandardSINDyResult
-        println(sindy_result.basis)
+    sol = if sindy_result isa StandardSINDyResult
+        sindy_result.sol
     elseif sindy_result isa EnsembleSINDyResult
-        println(sindy_result.base_result.basis)
+        sindy_result.base_result.sol
+    else
+        nothing
+    end
+
+    if sol !== nothing
+        basis_obj = get_basis(sol)
+        
+        for eq in equations(basis_obj)
+            println(eq)
+        end
+    else
+        println("Tipo de resultado no reconocido.")
     end
     
     println("=" ^ 70 * "\n")
 end
-
 
 
 """
@@ -174,7 +184,7 @@ function run_experiment(experiment::ExperimentConfig)
         sindy_result = run_sindy(normalized_data, experiment)
         println("SINDy completed\n")
 
-        sim_denorm = simulate(sindy_result, normalized_data, experiment)
+        sim_denorm = simulate(sindy_result, normalized_data, experiment, scheme = ContinuousODE())
         println("ODE simulation completed\n")
 
         plot_files = plot_from_experiment(experiment, sindy_result, sim_denorm, normalized_data, raw_data)

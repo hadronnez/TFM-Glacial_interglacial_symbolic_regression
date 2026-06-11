@@ -18,14 +18,14 @@ using Dates
 using MLUtils
 
 include("utils/find_times.jl")
-include("utils/minmax_normalization.jl")
+include("utils/normalization.jl")
 include("abstractions/types.jl")
 include("data/loading.jl")
 include("data/preprocess.jl")
 include("data/logging.jl")
 include("sindy/utils.jl")
 include("sindy/solvers.jl")
-include("ode_solvers/ode_integrate.jl")
+include("ode_solvers/numerical_integrate.jl")
 include("analysis/plotting.jl")
 include("abstractions/dispatcher.jl")
 

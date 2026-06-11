@@ -116,9 +116,10 @@ function simulate_ode(sol, H_fine, I_fine, C_fine, t_norm_final)
     t_min, t_max = t_norm_final[1], t_norm_final[end]
 
     function discovered_ode!(du, u, p, t_val)
-        safe_t = clamp(t_val, t_min, t_max)
-        u_control = [I_interp_ode(safe_t), C_interp_ode(safe_t)]
-        du .= discovered_sys(u, p, safe_t, u_control)
+        # safe_t = clamp(t_val, t_min, t_max)
+        # u_control = [I_interp_ode(safe_t), C_interp_ode(safe_t)]
+        u_control = nni(t_val)
+        du .= discovered_sys(u, p, t_val, u_control)
     end
 
     u0_norm = [H_fine[1]]
